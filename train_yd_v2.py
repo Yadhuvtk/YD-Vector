@@ -11,15 +11,10 @@ from peft import LoraConfig, get_peft_model
 import timm
 import os
 
-# --- SETTINGS ---
-# Resuming from your latest successful 'Brain' save
 MODEL_PATH = "./YD_Vector_Checkpoints/checkpoint-2500"
-# Base projector (since projector-2500 wasn't saved yet)
 PROJECTOR_PATH = "yd_projector.bin" 
 SHARDS_PATH = "file:E:/Yadhu Projects/YD-Vector/SVG_Shards/yd-vector-{000000..000226}.tar"
 OUTPUT_DIR = "./YD_Vector_Checkpoints"
-
-# Optimized for RTX 5090 24GB-32GB range
 BATCH_SIZE = 10 
 LEARNING_RATE = 1e-4
 
@@ -44,7 +39,6 @@ def transform_data(sample):
 if __name__ == '__main__':
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # Always load the tokenizer from the base folder
     tokenizer = PreTrainedTokenizerFast.from_pretrained("./YD_Vector_Base")
     tokenizer.pad_token = "[PAD]"
 
@@ -63,7 +57,6 @@ if __name__ == '__main__':
 
     model.gradient_checkpointing_enable()
 
-    # Peft handles the resume automatically when loading from a checkpoint folder
     peft_config = LoraConfig(
         r=32, lora_alpha=64, 
         target_modules=["q_proj", "v_proj", "k_proj", "o_proj"], 
@@ -72,7 +65,6 @@ if __name__ == '__main__':
     )
     model = get_peft_model(model, peft_config)
 
-    print("Loading Vision Tower & Bridge...")
     vision_tower = timm.create_model('vit_so400m_patch14_siglip_384', pretrained=True, num_classes=0).to("cuda").to(torch.bfloat16).eval()
     
     projector = YDProjector().to("cuda").to(torch.bfloat16)
@@ -88,7 +80,7 @@ if __name__ == '__main__':
     model.train()
 
     for step, (images, svg_texts) in enumerate(loader):
-        actual_step = step + 2500 # Adjusting logs to show real progress
+        actual_step = step + 2500
         
         images = images.to("cuda")
         tokens = tokenizer(svg_texts, truncation=True, max_length=1024, padding="max_length", return_tensors="pt").to("cuda")
@@ -115,9 +107,28 @@ if __name__ == '__main__':
             vram_gb = torch.cuda.memory_reserved() / 1e9
             print(f"Step {actual_step} | Loss: {loss.item():.4f} | VRAM: {vram_gb:.2f}GB")
 
-        # Save both parts every 500 steps
         if actual_step % 500 == 0:
             save_path = f"{OUTPUT_DIR}/checkpoint-{actual_step}"
             model.save_pretrained(save_path)
             torch.save(projector.state_dict(), f"{OUTPUT_DIR}/projector-{actual_step}.bin")
-            print(f"--- [SUCCESS] Saved Brain & Bridge at Step {actual_step} ---")
+            
+            model.eval()
+            with torch.no_grad():
+                test_img = images[0:1]
+                test_feats = vision_tower.forward_features(test_img)
+                test_embs = projector(test_feats)
+                
+                gen_ids = model.generate(
+                    inputs_embeds=test_embs,
+                    max_new_tokens=512,
+                    temperature=0.2,
+                    do_sample=True,
+                    eos_token_id=tokenizer.eos_token_id
+                )
+                
+                preview_svg = tokenizer.decode(gen_ids[0], skip_special_tokens=True)
+                with open(f"{OUTPUT_DIR}/preview-{actual_step}.svg", "w", encoding="utf-8") as f:
+                    f.write(preview_svg)
+            
+            model.train()
+            print(f"--- [SUCCESS] Saved Brain, Bridge, and Preview at Step {actual_step} ---")
